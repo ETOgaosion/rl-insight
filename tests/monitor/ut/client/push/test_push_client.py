@@ -34,7 +34,8 @@ from rl_insight.client.push.sinks.base import PushSink
 class RecordingSink(PushSink):
     def __init__(self, prefix: str = "") -> None:
         super().__init__(prefix)
-        self.calls: list[tuple[str, str, float, dict]] = []
+        # Heterogeneous records: metric ops are 4-tuples, spans are 5-tuples.
+        self.calls: list[tuple[Any, ...]] = []
         self.closed = False
 
     def emit_counter(self, name, value, tags):
