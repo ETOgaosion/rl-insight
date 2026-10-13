@@ -12,7 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit tests for monitor config layering (defaults < RL_INSIGHT_CONFIG < init < env URL)."""
+"""Unit tests for monitor config layering.
+
+Precedence (lowest to highest): built-in defaults, the external YAML named by
+``RL_INSIGHT_CONFIG``, the explicit ``init(config)`` mapping, and finally the
+``RL_INSIGHT_SERVER_URL`` / ``RL_INSIGHT_SERVER_BACKEND`` environment variables.
+"""
 
 from __future__ import annotations
 
@@ -30,6 +35,7 @@ def _clear_config_env(
 ) -> Generator[None, None, None]:
     monkeypatch.delenv(MonitorEnv.CONFIG_PATH, raising=False)
     monkeypatch.delenv(MonitorEnv.SERVER_URL, raising=False)
+    monkeypatch.delenv(MonitorEnv.SERVER_BACKEND, raising=False)
     yield
 
 
@@ -37,6 +43,13 @@ def test_load_monitor_config_should_default_to_ray_backend() -> None:
     conf = load_monitor_config()
     assert conf.server.backend == MonitorBackend.RAY
     assert conf.server.url == ""
+
+
+def test_load_monitor_config_should_merge_user_config() -> None:
+    conf = load_monitor_config({"server": {"backend": "custom", "url": "http://a"}})
+
+    assert conf.server.backend == "custom"
+    assert conf.server.url == "http://a"
 
 
 def test_load_monitor_config_should_merge_external_yaml(
@@ -95,6 +108,16 @@ def test_load_monitor_config_should_ignore_broken_external_file(
     assert conf.server.backend == MonitorBackend.RAY
 
 
+def test_server_url_env_should_override_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(MonitorEnv.SERVER_URL, " http://env:18080 ")
+
+    conf = load_monitor_config({"server": {"url": "http://config"}})
+
+    assert conf.server.url == "http://env:18080"
+
+
 def test_load_monitor_config_should_let_server_url_env_win(
     monkeypatch: pytest.MonkeyPatch, tmp_path
 ) -> None:
@@ -106,3 +129,35 @@ def test_load_monitor_config_should_let_server_url_env_win(
     conf = load_monitor_config()
 
     assert conf.server.url == "http://from-env"
+
+
+def test_server_backend_env_should_apply_without_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Worker processes often call ``rl_insight.init()`` without the trainer
+    # config, so the environment is the only way to select their backend.
+    monkeypatch.setenv(MonitorEnv.SERVER_BACKEND, " custom ")
+
+    conf = load_monitor_config()
+
+    assert conf.server.backend == "custom"
+
+
+def test_server_backend_env_should_override_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(MonitorEnv.SERVER_BACKEND, "custom")
+
+    conf = load_monitor_config({"server": {"backend": MonitorBackend.RAY}})
+
+    assert conf.server.backend == "custom"
+
+
+def test_empty_server_backend_env_should_be_ignored(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(MonitorEnv.SERVER_BACKEND, "  ")
+
+    conf = load_monitor_config({"server": {"backend": "custom"}})
+
+    assert conf.server.backend == "custom"

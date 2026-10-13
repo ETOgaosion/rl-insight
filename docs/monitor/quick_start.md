@@ -144,7 +144,7 @@ At startup, RL-Insight copies them into the runtime dashboards directory and pro
 ~/.rl-insight/runtime/dashboards
 ```
 
-To add a dashboard, put the JSON in an existing subdirectory, or add a new subdirectory for a new folder, then restart the stack.
+To add a dashboard, you can still put its JSON in an existing package subdirectory, or add a new subdirectory for a new folder, then restart the stack. For integration-owned dashboards, the recommended approach is to pass an external directory with `--extra-dashboard-dir`; this keeps the installed package unchanged. See [Custom Grafana Dashboards](./custom_dashboards.md) for details.
 
 Prometheus metrics and Tempo traces are persisted under `~/.rl-insight/data` by default. Stopping the server does not delete collected data.
 
@@ -190,6 +190,7 @@ Environment variables take precedence for common deployment settings:
 | Variable | Purpose |
 |---|---|
 | `RL_INSIGHT_SERVER_URL` | RL-Insight server URL, for example `http://<server-ip>:18080`. |
+| `RL_INSIGHT_SERVER_BACKEND` | Trainer-side monitor client backend (`server.backend`), for example `ray`. Also applies to worker processes that call `rl_insight.init()` without a config. |
 
 ## Troubleshooting
 

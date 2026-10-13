@@ -88,7 +88,8 @@ def load_monitor_config(
 
     Precedence (lowest to highest): built-in defaults, the external YAML named
     by ``RL_INSIGHT_CONFIG``, the explicit ``config`` argument (``init(config)``),
-    and finally ``RL_INSIGHT_SERVER_URL`` for ``server.url``.
+    and finally the ``RL_INSIGHT_SERVER_URL`` / ``RL_INSIGHT_SERVER_BACKEND``
+    environment variables for ``server.url`` / ``server.backend``.
 
     Args:
         config: Partial mapping or ``DictConfig`` merged on top of defaults and
@@ -109,6 +110,8 @@ def load_monitor_config(
 
     if url := os.environ.get(MonitorEnv.SERVER_URL):
         merged.server.url = str(url).strip()
+    if backend := os.environ.get(MonitorEnv.SERVER_BACKEND, "").strip():
+        merged.server.backend = backend
     return merged
 
 
