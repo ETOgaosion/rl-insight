@@ -43,8 +43,6 @@ STREAM_METRIC = "metric"
 STREAM_TRACE = "trace"
 STREAM_ROLLOUT = "rollout"
 
-_NS_TO_US = 1000
-
 
 @dataclass(frozen=True)
 class _MetricRule:
@@ -112,7 +110,9 @@ class PushMonitorClient(MonitorClient):
             return "emit_counter"
         if kind == MonitorEventKind.GAUGE:
             return "emit_store"
-        return "emit_timer"  # histogram -> timer; producers report microseconds
+        if kind == MonitorEventKind.HISTOGRAM:
+            return "emit_histogram"
+        return "emit_timer"
 
     def _route_metric(self, kind: str, event: dict[str, Any]) -> None:
         raw_name = str(event.get("name", ""))
@@ -140,16 +140,18 @@ class PushMonitorClient(MonitorClient):
             self._safe(bound, method, suffix, out_value, tags)
 
     def _route_trace(self, event: dict[str, Any]) -> None:
-        duration_us = (
-            int(event.get("end_time_ns", 0)) - int(event.get("start_time_ns", 0))
-        ) // _NS_TO_US
+        start_ns = int(event.get("start_time_ns", 0))
+        end_ns = int(event.get("end_time_ns", 0))
         suffix = f"{self._trace_prefix}{event.get('name', '')}"
-        event_tags = _scalar_string_tags(event.get("attributes"))
+        # Keep the raw attributes (including sequences) so a tracing sink can
+        # reconstruct the span; metrics-only sinks collapse to a duration timer
+        # via PushSink.emit_span's default.
+        event_attrs = dict(event.get("attributes") or {})
         for bound in list(self._bound):
             if not bound.alive or STREAM_TRACE not in bound.streams:
                 continue
-            tags = {**bound.tags, **event_tags}
-            self._safe(bound, "emit_timer", suffix, float(duration_us), tags)
+            attributes = {**bound.tags, **event_attrs}
+            self._safe(bound, "emit_span", suffix, start_ns, end_ns, attributes)
 
     def emit_rollout(
         self, name: str, op: str, value: float, tags: dict[str, str]

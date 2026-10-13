@@ -21,7 +21,44 @@ import logging
 from omegaconf import OmegaConf
 
 from rl_insight.client.push.sinks import LoggingSink
+from rl_insight.client.push.sinks.base import PushSink
 from rl_insight.client.push.sinks.logging import create_sink
+
+
+class _MetricsOnlySink(PushSink):
+    """Sink implementing only the three abstract metric primitives."""
+
+    def __init__(self) -> None:
+        super().__init__("root")
+        self.calls: list[tuple[str, str, float, dict]] = []
+
+    def emit_counter(self, name, value, tags):
+        self.calls.append(("counter", name, value, dict(tags)))
+
+    def emit_store(self, name, value, tags):
+        self.calls.append(("store", name, value, dict(tags)))
+
+    def emit_timer(self, name, value_us, tags):
+        self.calls.append(("timer", name, value_us, dict(tags)))
+
+
+def test_default_emit_histogram_should_fall_back_to_timer() -> None:
+    sink = _MetricsOnlySink()
+    sink.emit_histogram("lat", 900, {"a": "1"})
+    assert sink.calls == [("timer", "lat", 900, {"a": "1"})]
+
+
+def test_default_emit_span_should_fall_back_to_duration_timer() -> None:
+    sink = _MetricsOnlySink()
+    sink.emit_span(
+        "trace.generate",
+        1_000_000,
+        3_500_000,
+        {"state_lane_id": "replica_0", "seq": [1, 2], "empty": None},
+    )
+    assert sink.calls == [
+        ("timer", "trace.generate", 2500.0, {"state_lane_id": "replica_0"})
+    ]
 
 
 def test_metric_name_should_join_prefix_and_suffix() -> None:
@@ -49,6 +86,16 @@ def test_logging_sink_should_emit_three_kinds(caplog) -> None:
     assert any("counter p.c=3" in m and "'a': '1'" in m for m in messages)
     assert any("store p.g=1.5" in m for m in messages)
     assert any("timer p.t=2500us" in m for m in messages)
+
+
+def test_logging_sink_should_emit_histogram_and_span(caplog) -> None:
+    sink = LoggingSink(prefix="p")
+    with caplog.at_level(logging.INFO, logger="rl_insight.push.logging"):
+        sink.emit_histogram("h", 7, {})
+        sink.emit_span("trace.op", 1000, 2000, {"state_name": "gen"})
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("histogram p.h=7" in m for m in messages)
+    assert any("span p.trace.op" in m and "state_name" in m for m in messages)
 
 
 def test_create_sink_factory_should_read_prefix() -> None:

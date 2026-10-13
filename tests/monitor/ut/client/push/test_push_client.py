@@ -56,12 +56,35 @@ def _clear_active() -> Generator[None, None, None]:
     poller_module.set_active_registry(None)
 
 
-def _install_driver(name: str, sinks: list[RecordingSink], factory="create_sink"):
+class FullRecordingSink(RecordingSink):
+    """Sink that also overrides the optional histogram/span primitives."""
+
+    def emit_histogram(self, name, value, tags):  # type: ignore[override]
+        self.calls.append(("histogram", self.metric_name(name), value, dict(tags)))
+
+    def emit_span(self, name, start_ns, end_ns, attributes):  # type: ignore[override]
+        self.calls.append(
+            (
+                "span",
+                self.metric_name(name),
+                int(start_ns),
+                int(end_ns),
+                dict(attributes),
+            )
+        )
+
+
+def _install_driver(
+    name: str,
+    sinks: list[RecordingSink],
+    factory: str = "create_sink",
+    sink_cls: type[RecordingSink] = RecordingSink,
+):
     module = types.ModuleType(name)
 
     def create_sink(conf: Any) -> RecordingSink:
         prefix = str(OmegaConf.select(conf, "prefix") or "")
-        sink = RecordingSink(prefix)
+        sink = sink_cls(prefix)
         sinks.append(sink)
         return sink
 
@@ -265,6 +288,43 @@ def test_trace_event_converts_ns_to_us(monkeypatch: pytest.MonkeyPatch) -> None:
     assert tags["state_lane_id"] == "replica_0"
     assert "seq" not in tags  # non-scalar attributes are dropped
     assert sinks[1].calls == []
+    client.close()
+
+
+def test_histogram_and_trace_keep_native_primitives_when_sink_supports_them(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sinks: list[RecordingSink] = []
+    _install_driver("fake_push_sinks_mod", sinks, sink_cls=FullRecordingSink)
+    client = create_push_monitor_client(_dual_conf(monkeypatch))
+    assert client is not None
+
+    client.apply_event({"kind": "histogram", "name": "lat", "value": 900, "labels": {}})
+    client.apply_event(
+        {
+            "kind": "trace",
+            "name": "generate",
+            "start_time_ns": 1_000_000,
+            "end_time_ns": 3_500_000,
+            "attributes": {"state_lane_id": "replica_0", "seq": [1, 2]},
+        }
+    )
+
+    ops = sinks[0].calls
+    assert (
+        "histogram",
+        "seed.alphaseed.trainer.lat",
+        900.0,
+        {"trial": "trial-42"},
+    ) in ops
+    span = next(c for c in ops if c[0] == "span")
+    _, full_name, start_ns, end_ns, attrs = span
+    assert full_name == "seed.alphaseed.trace.generate"
+    assert (start_ns, end_ns) == (1_000_000, 3_500_000)
+    # The tracing sink receives raw attributes, including non-scalar sequences.
+    assert attrs["state_lane_id"] == "replica_0"
+    assert attrs["seq"] == [1, 2]
+    assert attrs["trial"] == "trial-42"  # bound sink tags are merged
     client.close()
 
 

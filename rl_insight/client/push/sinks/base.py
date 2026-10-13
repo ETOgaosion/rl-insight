@@ -23,9 +23,12 @@ Timers always use microseconds.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Mapping
+from typing import Any, Mapping
 
 TagMap = Mapping[str, str]
+AttrMap = Mapping[str, Any]
+
+_NS_PER_US = 1000
 
 
 class PushSink(ABC):
@@ -59,6 +62,38 @@ class PushSink(ABC):
     @abstractmethod
     def emit_timer(self, name: str, value_us: float, tags: TagMap) -> None:
         """Record a duration ``value_us`` (microseconds) for ``name``."""
+
+    def emit_histogram(self, name: str, value: float, tags: TagMap) -> None:
+        """Record one histogram sample ``value`` for ``name``.
+
+        Sinks that support native distributions (e.g. OTLP/Prometheus) override
+        this; the default treats the observation as a timer value, matching the
+        duration histograms verl reports in microseconds.
+        """
+        self.emit_timer(name, value, tags)
+
+    def emit_span(
+        self,
+        name: str,
+        start_time_ns: int,
+        end_time_ns: int,
+        attributes: AttrMap,
+    ) -> None:
+        """Record a completed span (``trace_span``/``trace_op``/``trace_state``).
+
+        ``name`` is the stream-routed metric name and ``attributes`` carries the
+        raw span attributes (including non-scalar values). Sinks with a tracing
+        backend (e.g. OTLP/Tempo) override this to keep the span structure; the
+        default collapses the span to its duration timer so metrics-only
+        backends (such as a time-series store) need no tracing dependency.
+        """
+        duration_us = max(0, int(end_time_ns) - int(start_time_ns)) / _NS_PER_US
+        tags = {
+            str(key): str(value)
+            for key, value in (attributes or {}).items()
+            if value is not None and isinstance(value, (str, bool, int, float))
+        }
+        self.emit_timer(name, duration_us, tags)
 
     def flush(self) -> None:
         """Best-effort flush of any buffered points. Default: no-op."""

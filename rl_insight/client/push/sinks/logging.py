@@ -53,6 +53,29 @@ class LoggingSink(PushSink):
             dict(tags),
         )
 
+    def emit_histogram(self, name: str, value: float, tags: Mapping[str, str]) -> None:
+        self._log.info(
+            "[push] histogram %s=%s tags=%s",
+            self.metric_name(name),
+            value,
+            dict(tags),
+        )
+
+    def emit_span(
+        self,
+        name: str,
+        start_time_ns: int,
+        end_time_ns: int,
+        attributes: Mapping[str, Any],
+    ) -> None:
+        self._log.info(
+            "[push] span %s start_ns=%s end_ns=%s attrs=%s",
+            self.metric_name(name),
+            start_time_ns,
+            end_time_ns,
+            dict(attributes),
+        )
+
 
 def create_sink(conf: Any) -> LoggingSink:
     """Factory for the built-in ``logging`` driver; reads ``prefix`` from sink config."""
