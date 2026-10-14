@@ -189,7 +189,7 @@ Start the full stack on Linux:
 ```bash
 docker run -d --name rl-insight --network host --stop-timeout 45 \
     --shm-size=2g \
-    -v rl-insight-data:/home/rl-insight/.rl-insight/data \
+    -v rl-insight-data:/root/.rl-insight/data \
     rl-insight:latest
 ```
 
@@ -200,7 +200,7 @@ docker run -d --name rl-insight --network host --stop-timeout 45 \
 | `--shm-size=2g`          | Shared memory headroom; the Docker default of 64MB is too small.                                               |
 | `-v rl-insight-data:...` | Persist server data in a named volume (see**Data Persistence** below).                                   |
 
-The container runs as the non-root user `rl-insight` (uid 10001), matching the non-root deployment recommended above. No custom data path is configured: `~` simply resolves to `/home/rl-insight` for that user, so data still lives in the default `~/.rl-insight` layout described in **Data Persistence** below. The named volume mounts exactly that directory, which the image also declares as a `VOLUME`.
+The container runs as `root` and bundles common debugging tools such as `curl` and `vim`. `~` resolves to `/root`, so data stays in the default `~/.rl-insight` layout; the named volume mounts exactly that directory (see **Data Persistence** below).
 
 ### Port Mapping
 
@@ -209,7 +209,7 @@ With `--network host`, service ports land on the host unchanged and cannot be re
 ```bash
 docker run -d --name rl-insight --stop-timeout 45 --shm-size=2g \
     -p 18080:18080 -p 9090:9090 -p 3200:3200 -p 13000:3000 \
-    -v rl-insight-data:/home/rl-insight/.rl-insight/data \
+    -v rl-insight-data:/root/.rl-insight/data \
     rl-insight:latest
 ```
 
