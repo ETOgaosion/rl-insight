@@ -213,6 +213,9 @@ def _select_or(conf: Any, key: str, default: str) -> str:
     return default if value is None else str(value)
 
 
+_VALID_OPS = frozenset(_OP_METHOD)
+
+
 def _metric_mapping(sink_conf: Any) -> dict[str, _MetricRule] | None:
     """Parse a sink's ``metric_mapping`` list into ``{source: rule}``.
 
@@ -220,20 +223,93 @@ def _metric_mapping(sink_conf: Any) -> dict[str, _MetricRule] | None:
     ``source`` are emitted to that sink (whitelist), using the mapped output
     ``name`` and optional ``op`` (store|counter|timer), ``scale`` and static
     ``tags``. Returns ``None`` when the sink keeps default prefix passthrough.
+
+    Raises:
+        ValueError: A rule is missing ``source``/``name`` or uses an unknown
+            ``op``/non-numeric ``scale``. Callers decide whether to degrade.
     """
     raw = OmegaConf.select(sink_conf, "metric_mapping")
     if raw is None:
         return None
     rules: dict[str, _MetricRule] = {}
-    for item in raw:
-        source = str(OmegaConf.select(item, "source"))
-        name = str(OmegaConf.select(item, "name"))
+    for index, item in enumerate(raw):
+        source = OmegaConf.select(item, "source")
+        name = OmegaConf.select(item, "name")
+        if source is None or str(source) == "" or name is None or str(name) == "":
+            raise ValueError(
+                f"metric_mapping[{index}] requires non-empty 'source' and 'name'"
+            )
         op = OmegaConf.select(item, "op")
+        if op is not None and str(op) not in _VALID_OPS:
+            raise ValueError(
+                f"metric_mapping[{index}] has invalid op {str(op)!r}; "
+                f"expected one of {sorted(_VALID_OPS)}"
+            )
         method = None if op is None else _OP_METHOD[str(op)]
-        scale = float(OmegaConf.select(item, "scale", default=1.0))
+        try:
+            scale = float(OmegaConf.select(item, "scale", default=1.0))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"metric_mapping[{index}] 'scale' must be numeric"
+            ) from exc
         tags = _scalar_string_tags(OmegaConf.select(item, "tags"))
-        rules[source] = _MetricRule(name=name, method=method, scale=scale, tags=tags)
+        rules[str(source)] = _MetricRule(
+            name=str(name), method=method, scale=scale, tags=tags
+        )
     return rules
+
+
+def _bind_sink(sink: PushSink, sink_conf: Any) -> _BoundSink | None:
+    """Bind a loaded sink to its parsed config; degrade on bad config.
+
+    Configuration errors (invalid streams or ``metric_mapping``) never crash
+    training: the offending sink is skipped with a warning, mirroring the
+    driver-load failure path in :func:`driver.build_sink`.
+    """
+    name = str(OmegaConf.select(sink_conf, "name") or sink.__class__.__name__)
+    try:
+        return _BoundSink(
+            sink=sink,
+            streams=_streams(sink_conf),
+            rollout_prefix=_select_or(
+                sink_conf, "rollout_name_prefix", DEFAULT_ROLLOUT_PREFIX
+            ),
+            tags=collect_env_tags(OmegaConf.select(sink_conf, "tags_from_env")),
+            metric_rules=_metric_mapping(sink_conf),
+        )
+    except Exception as exc:  # noqa: BLE001 - bad config disables one sink only
+        logger.warning(
+            "[rl-insight] push sink %r configured incorrectly (%s); skipping it.",
+            name,
+            exc,
+        )
+        return None
+
+
+def _parse_interval(push_conf: Any) -> float:
+    """Read ``rollout.interval_seconds``; fall back to the default when invalid."""
+    raw = OmegaConf.select(push_conf, "rollout.interval_seconds")
+    if raw is None:
+        return DEFAULT_ROLLOUT_INTERVAL
+    try:
+        interval = float(raw)
+    except (TypeError, ValueError):
+        logger.warning(
+            "[rl-insight] push rollout.interval_seconds=%r is not numeric; "
+            "using default %ss.",
+            raw,
+            DEFAULT_ROLLOUT_INTERVAL,
+        )
+        return DEFAULT_ROLLOUT_INTERVAL
+    if interval <= 0:
+        logger.warning(
+            "[rl-insight] push rollout.interval_seconds=%s must be positive; "
+            "using default %ss.",
+            interval,
+            DEFAULT_ROLLOUT_INTERVAL,
+        )
+        return DEFAULT_ROLLOUT_INTERVAL
+    return interval
 
 
 def create_push_monitor_client(conf: DictConfig) -> PushMonitorClient | None:
@@ -253,17 +329,9 @@ def create_push_monitor_client(conf: DictConfig) -> PushMonitorClient | None:
         sink = build_sink(sink_conf)
         if sink is None:
             continue
-        bound.append(
-            _BoundSink(
-                sink=sink,
-                streams=_streams(sink_conf),
-                rollout_prefix=_select_or(
-                    sink_conf, "rollout_name_prefix", DEFAULT_ROLLOUT_PREFIX
-                ),
-                tags=collect_env_tags(OmegaConf.select(sink_conf, "tags_from_env")),
-                metric_rules=_metric_mapping(sink_conf),
-            )
-        )
+        binding = _bind_sink(sink, sink_conf)
+        if binding is not None:
+            bound.append(binding)
 
     if not bound:
         logger.warning("[rl-insight] push backend has no usable sinks; disabled.")
@@ -273,10 +341,7 @@ def create_push_monitor_client(conf: DictConfig) -> PushMonitorClient | None:
     trace_prefix = _select_or(push_conf, "trace_prefix", DEFAULT_TRACE_PREFIX)
 
     rules = OmegaConf.select(push_conf, "rollout.metrics")
-    interval_raw = OmegaConf.select(push_conf, "rollout.interval_seconds")
-    interval = (
-        float(interval_raw) if interval_raw is not None else DEFAULT_ROLLOUT_INTERVAL
-    )
+    interval = _parse_interval(push_conf)
     poller: PrometheusPoller | None = None
     if rules and any(STREAM_ROLLOUT in b.streams for b in bound):
         poller = PrometheusPoller(

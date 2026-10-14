@@ -352,6 +352,114 @@ def test_rollout_emit_fans_out_with_per_sink_prefix(
     client.close()
 
 
+def test_malformed_sink_config_is_skipped_without_raising(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    sinks: list[RecordingSink] = []
+    _install_driver("fake_push_sinks_mod", sinks)
+    conf = OmegaConf.create(
+        {
+            "server": {"backend": "push"},
+            "push": {
+                "sinks": [
+                    # Valid sink must keep working despite the bad neighbour.
+                    {
+                        "name": "good",
+                        "driver": "fake_push_sinks_mod:create_sink",
+                        "prefix": "p",
+                        "streams": ["metric"],
+                    },
+                    # Unknown op in metric_mapping -> this sink is dropped.
+                    {
+                        "name": "bad-op",
+                        "driver": "fake_push_sinks_mod:create_sink",
+                        "prefix": "p",
+                        "streams": ["metric"],
+                        "metric_mapping": [
+                            {"source": "x", "name": "y", "op": "not_an_op"}
+                        ],
+                    },
+                    # Non-numeric scale -> this sink is dropped.
+                    {
+                        "name": "bad-scale",
+                        "driver": "fake_push_sinks_mod:create_sink",
+                        "prefix": "p",
+                        "streams": ["metric"],
+                        "metric_mapping": [
+                            {"source": "x", "name": "y", "scale": "fast"}
+                        ],
+                    },
+                ]
+            },
+        }
+    )
+
+    with caplog.at_level("WARNING", logger="rl_insight.client.push.client"):
+        client = create_push_monitor_client(conf)
+    assert client is not None  # malformed entries do not disable monitoring
+
+    client.apply_event({"kind": "gauge", "name": "reward", "value": 1, "labels": {}})
+    # All three drivers loaded, but only the well-configured one was bound and
+    # received the event; the two malformed sinks were skipped with a warning.
+    active = [s for s in sinks if s.calls]
+    assert len(active) == 1
+    assert active[0].calls[0][:2] == ("store", "p.trainer.reward")
+    assert any("configured incorrectly" in r.message for r in caplog.records)
+    client.close()
+
+
+def test_all_sinks_misconfigured_disables_push_without_raising() -> None:
+    sinks: list[RecordingSink] = []
+    _install_driver("fake_push_sinks_mod", sinks)
+    conf = OmegaConf.create(
+        {
+            "server": {"backend": "push"},
+            "push": {
+                "sinks": [
+                    {
+                        "name": "bad",
+                        "driver": "fake_push_sinks_mod:create_sink",
+                        "metric_mapping": [{"source": "", "name": ""}],
+                    }
+                ]
+            },
+        }
+    )
+
+    assert create_push_monitor_client(conf) is None
+    # The driver loaded one instance, but it was never bound (no emissions).
+    assert len(sinks) == 1
+    assert sinks[0].calls == []
+
+
+def test_invalid_rollout_interval_falls_back_to_default(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    sinks: list[RecordingSink] = []
+    _install_driver("fake_push_sinks_mod", sinks)
+    conf = OmegaConf.create(
+        {
+            "server": {"backend": "push"},
+            "push": {
+                "sinks": [
+                    {
+                        "name": "a",
+                        "driver": "fake_push_sinks_mod:create_sink",
+                        "streams": ["metric"],
+                    }
+                ],
+                "rollout": {"interval_seconds": "soon"},
+            },
+        }
+    )
+    with caplog.at_level("WARNING", logger="rl_insight.client.push.client"):
+        client = create_push_monitor_client(conf)
+    assert client is not None
+    assert client._poller is None  # no rollout.metrics rules
+    assert any("interval_seconds" in r.message for r in caplog.records)
+    client.close()
+
+
 def test_failing_sink_is_removed_but_others_keep_working(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
