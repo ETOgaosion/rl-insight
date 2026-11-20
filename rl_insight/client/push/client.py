@@ -122,22 +122,30 @@ class PushMonitorClient(MonitorClient):
         for bound in list(self._bound):
             if not bound.alive or STREAM_METRIC not in bound.streams:
                 continue
-            rule = (
-                None if bound.metric_rules is None else bound.metric_rules.get(raw_name)
-            )
-            if bound.metric_rules is not None and rule is None:
-                continue  # whitelist sink: unmapped trainer metrics are dropped
-            if rule is None:
-                suffix = f"{self._metric_prefix}{raw_name}"
-                method = default_method
-                out_value = value
-                tags = {**bound.tags, **event_tags}
-            else:
-                suffix = rule.name
-                method = rule.method or default_method
-                out_value = value * rule.scale
-                tags = {**bound.tags, **event_tags, **rule.tags}
-            self._safe(bound, method, suffix, out_value, tags)
+            self._emit_metric(bound, raw_name, value, event_tags, default_method)
+
+    def _emit_metric(
+        self,
+        bound: _BoundSink,
+        raw_name: str,
+        value: float,
+        event_tags: dict[str, str],
+        default_method: str,
+    ) -> None:
+        rule = None if bound.metric_rules is None else bound.metric_rules.get(raw_name)
+        if bound.metric_rules is not None and rule is None:
+            return  # whitelist sink: unmapped trainer metrics are dropped
+        if rule is None:
+            suffix = f"{self._metric_prefix}{raw_name}"
+            method = default_method
+            out_value = value
+            tags = {**bound.tags, **event_tags}
+        else:
+            suffix = rule.name
+            method = rule.method or default_method
+            out_value = value * rule.scale
+            tags = {**bound.tags, **event_tags, **rule.tags}
+        self._safe(bound, method, suffix, out_value, tags)
 
     def _route_trace(self, event: dict[str, Any]) -> None:
         start_ns = int(event.get("start_time_ns", 0))
@@ -147,8 +155,47 @@ class PushMonitorClient(MonitorClient):
         # reconstruct the span; metrics-only sinks collapse to a duration timer
         # via PushSink.emit_span's default.
         event_attrs = dict(event.get("attributes") or {})
+        metric_record: tuple[str, float, dict[str, str]] | None = None
+        if event_attrs.get("monitor.trace_segment") == "metric_log" and {
+            "metric.name",
+            "metric.value",
+            "global_step",
+        }.issubset(event_attrs):
+            raw_name = str(event_attrs["metric.name"])
+            labels = {
+                key: value
+                for key, value in event_attrs.items()
+                if key
+                not in {
+                    "monitor.trace_segment",
+                    "metric.name",
+                    "metric.value",
+                    "global_step",
+                }
+            }
+            labels["rl_insight_step"] = event_attrs["global_step"]
+            labels["rl_insight_metric_name"] = raw_name
+            metric_record = (
+                raw_name.replace("/", "_"),
+                float(event_attrs["metric.value"]),
+                _scalar_string_tags(labels),
+            )
         for bound in list(self._bound):
-            if not bound.alive or STREAM_TRACE not in bound.streams:
+            if not bound.alive:
+                continue
+            if metric_record is not None:
+                # Keep step records intact for native trace exporters. The
+                # duration-only default would otherwise emit a zero timer.
+                native_span = (
+                    getattr(bound.sink.emit_span, "__func__", None)
+                    is not PushSink.emit_span
+                )
+                if STREAM_TRACE not in bound.streams or not native_span:
+                    if STREAM_METRIC in bound.streams or STREAM_TRACE in bound.streams:
+                        name, value, tags = metric_record
+                        self._emit_metric(bound, name, value, tags, "emit_store")
+                    continue
+            if STREAM_TRACE not in bound.streams:
                 continue
             attributes = {**bound.tags, **event_attrs}
             self._safe(bound, "emit_span", suffix, start_ns, end_ns, attributes)

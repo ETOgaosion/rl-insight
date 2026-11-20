@@ -249,6 +249,103 @@ def test_metric_mapping_renames_retags_scales_and_whitelists(
     client.close()
 
 
+@pytest.mark.parametrize("streams", [["metric"], ["trace"], ["metric", "trace"]])
+def test_metric_log_maps_scalar_for_metric_sink_and_preserves_native_span(
+    monkeypatch: pytest.MonkeyPatch, streams: list[str]
+) -> None:
+    sinks: list[RecordingSink] = []
+    trace_sinks: list[RecordingSink] = []
+    _install_driver("fake_step_metric_mod", sinks)
+    _install_driver("fake_step_trace_mod", trace_sinks, sink_cls=FullRecordingSink)
+    api.finish()
+    try:
+        api.init(
+            project="project",
+            experiment_name="experiment",
+            config={
+                "server": {"backend": "push"},
+                "push": {
+                    "sinks": [
+                        {
+                            "driver": "fake_step_metric_mod:create_sink",
+                            "prefix": "metrics",
+                            "streams": streams,
+                            "metric_mapping": [
+                                {
+                                    "source": "actor_loss",
+                                    "name": "loss",
+                                    "op": "timer",
+                                    "scale": 1000,
+                                    "tags": {"stage": "actor"},
+                                }
+                            ],
+                        },
+                        {
+                            "driver": "fake_step_trace_mod:create_sink",
+                            "prefix": "traces",
+                            "streams": ["metric", "trace"],
+                        },
+                        {
+                            "driver": "fake_step_metric_mod:create_sink",
+                            "prefix": "rollout",
+                            "streams": ["rollout"],
+                        },
+                    ]
+                },
+            },
+        )
+        api.metric_log("actor/loss", 0.125, step=7, rank=2)
+
+        metrics, rollout = sinks
+        assert len(metrics.calls) == 1
+        op, name, value, tags = metrics.calls[0]
+        assert (op, name, value) == ("timer", "metrics.loss", 125.0)
+        assert tags["stage"] == "actor"
+        assert tags["rank"] == "2"
+        assert tags["project"] == "project"
+        assert tags["rl_insight_step"] == "7"
+        assert tags["rl_insight_metric_name"] == "actor/loss"
+        assert not {"metric.value", "metric.name", "global_step"} & tags.keys()
+        assert rollout.calls == []
+
+        assert len(trace_sinks[0].calls) == 1
+        op, name, start_ns, end_ns, attributes = trace_sinks[0].calls[0]
+        assert (op, name) == ("span", "traces.trace.metric_log")
+        assert start_ns == end_ns
+        assert attributes["metric.name"] == "actor/loss"
+        assert attributes["metric.value"] == 0.125
+        assert attributes["global_step"] == 7
+        assert "rl_insight_step" not in attributes
+    finally:
+        api.finish()
+        sys.modules.pop("fake_step_metric_mod", None)
+        sys.modules.pop("fake_step_trace_mod", None)
+
+
+def test_trace_with_metric_marker_but_no_scalar_fields_remains_a_span(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sinks: list[RecordingSink] = []
+    _install_driver("fake_push_sinks_mod", sinks)
+    conf = _dual_conf(monkeypatch)
+    del conf.push.rollout
+    client = create_push_monitor_client(conf)
+    assert client is not None
+    try:
+        client.apply_event(
+            {
+                "kind": "trace",
+                "name": "custom",
+                "start_time_ns": 1_000_000,
+                "end_time_ns": 3_500_000,
+                "attributes": {"monitor.trace_segment": "metric_log"},
+            }
+        )
+        assert sinks[0].calls[0][:3] == ("timer", "seed.alphaseed.trace.custom", 2500.0)
+    finally:
+        client.close()
+
+
 def test_counter_and_histogram_event_mapping(monkeypatch: pytest.MonkeyPatch) -> None:
     sinks: list[RecordingSink] = []
     _install_driver("fake_push_sinks_mod", sinks)

@@ -44,7 +44,9 @@ insight.metric_log("reward_mean", value=0.8, step=12, worker="trainer_0")
 
 Use consistent label keys for each metric and stable values such as worker roles or replica IDs. Avoid per-request IDs as Prometheus labels. `documentation` supplies metric help text; omitting it uses generated text.
 
-With the default Ray namespace, gauges such as `queue_depth` are exposed as `rl_insight_monitor_queue_depth`. Prometheus samples gauges at scrape time, so intermediate updates can be missed. Use `metric_log` for step-tagged trace records; it is not a Prometheus gauge and requires a working trace export path. Histograms expose `_bucket`, `_sum`, and `_count` series for aggregation and percentile queries. Push sinks may translate names and types differently; see [Push Metric Distributions](push-distributions.md).
+With the default Ray namespace, gauges such as `queue_depth` are exposed as `rl_insight_monitor_queue_depth`. Prometheus samples gauges at scrape time, so intermediate updates can be missed. Use `metric_log` for step-tagged trace records; with the Ray backend it is not a Prometheus gauge and requires a working trace export path. Histograms expose `_bucket`, `_sum`, and `_count` series for aggregation and percentile queries. Push sinks may translate names and types differently; see [Push Metric Distributions](push-distributions.md).
+
+With Push, a sink that implements native span export receives the original `metric_log` record when its `trace` stream is enabled. Sinks using the default duration adapter receive the scalar value through the existing metric mapping instead of a zero-duration timer. Either the `metric` or `trace` stream enables this fallback. Names replace `/` with `_` for compatibility with existing trainer mappings, and `rl_insight_step` / `rl_insight_metric_name` preserve the step and original name for custom metric sinks. Each sink receives one representation of the record.
 
 ## Trace a runtime state
 

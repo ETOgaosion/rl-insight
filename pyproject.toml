@@ -48,6 +48,9 @@ test = [
 rl-insight = "rl_insight.cli:main"
 rl-insight-recipe = "recipe:main"
 
+[dependency-groups]
+dev = ["pre-commit"]
+
 [project.urls]
 Homepage = "https://github.com/verl-project/rl-insight"
 Source = "https://github.com/verl-project/rl-insight"
